@@ -194,8 +194,9 @@ hr{border:0;border-top:1px solid #263247;margin:16px 0}
     <button class="primary" id="notifyPermBtn" style="width:100%;margin-top:12px">通知を許可する 🔔</button>
     <div class="ngrid">
       <button class="dark" id="notifySaveBtn">通知設定を保存</button>
-      <button class="dark" id="notifyTestBtn">テスト通知</button>
+      <button class="dark" id="notifyTestBtn">テスト通知（端末内）</button>
     </div>
+    <button class="orange" id="pushTestBtn" style="width:100%;margin-top:8px">サーバーからテスト送信 ☁️🔔</button>
 
     <div class="notice">
       <details>
@@ -750,7 +751,14 @@ nagMe();render();
     ready:   function(){ return readyPromise; },
     syncNow: function(){ return syncAll(); },
     retry:   function(run){ return retry(run); },
-    diag:    function(){ return diag; }
+    diag:    function(){ return diag; },
+    url:     function(){ return SUPABASE_URL; },
+    token:   function(){
+      if(!sb) return Promise.resolve(null);
+      return sb.auth.getSession().then(function(g){
+        return (g.data && g.data.session && g.data.session.access_token) || null;
+      });
+    }
   };
 
   function el(id){ return document.getElementById(id); }
@@ -1164,6 +1172,54 @@ nagMe();render();
       });
   }
 
+  /* ---- サーバー（Edge Function）から自分宛にテスト送信させる ---- */
+  function fnUrl(){
+    return String(window.UgokiyaSync.url()).replace(/\/+$/, "") + "/functions/v1/daily-nag";
+  }
+
+  function callTestPush(){
+    return window.UgokiyaSync.token().then(function(tok){
+      if(!tok) return { error: { status:401, message:"ログインしてへん" } };
+      return fetch(fnUrl(), {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + tok, "Content-Type": "application/json" },
+        body: "{}"
+      }).then(function(res){
+        return res.json().catch(function(){ return {}; }).then(function(j){
+          if(res.status === 401) return { error: { status:401, message: j.error || "認証エラー" } };
+          if(!res.ok)            return { error: { message: j.error || ("HTTP " + res.status) } };
+          return { data: j };
+        });
+      });
+    });
+  }
+
+  function testPush(){
+    var btn = el("pushTestBtn");
+    if(btn) btn.disabled = true;
+    setStatus("サーバーに送信を依頼してる…");
+
+    // 認証エラーなら retry() がトークンを取り直して1回やり直す
+    window.UgokiyaSync.retry(callTestPush).then(function(r){
+      if(r.error) throw r.error;
+      var d = r.data || {};
+      if(d.sent > 0){
+        setStatus("✅ サーバーから送ったで（" + d.sent + "件）。届かんかったら通知設定を確認してな。");
+      }else{
+        setStatus("⚠️ 送信0件。購読が登録されてへんかもしれん（" + (d.subscriptions || 0) + "件の宛先）。");
+      }
+    }).catch(function(e){
+      var m = (e && (e.message || e.error)) || String(e);
+      if(String(m).indexOf("購読が登録されてへん") >= 0){
+        setStatus("⚠️ この端末の購読がサーバーに無い。通知スイッチを入れ直してみてや。");
+      }else{
+        setStatus("送信でけへんかった：" + m);
+      }
+    }).then(function(){
+      if(btn) btn.disabled = false;
+    });
+  }
+
   function init(){
     if(!hasPush()){
       setStatus("この端末はサーバー通知に未対応。アプリを開いた時の煽りだけ動くで。");
@@ -1184,6 +1240,9 @@ nagMe();render();
     });
 
     /* 既存のハンドラが走ったあとに、こちらも追従する */
+    var tb = el("pushTestBtn");
+    if(tb) tb.addEventListener("click", testPush);
+
     ["notifyOn","notifyTime","notifySaveBtn","notifyPermBtn"].forEach(function(id){
       var e = el(id);
       if(!e) return;
