@@ -4,6 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#111827">
+<link rel="manifest" href="./manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="動きやー">
+<meta name="description" content="毎日ちゃんと身体動かしたか、関西弁で容赦なく煽ってくる運動記録アプリ。">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="./icons/icon-512.png">
 <title>動きやー！</title>
 <style>
 :root{
@@ -74,6 +83,21 @@ label{display:block;color:#cbd5e1;font-size:12px;margin:10px 0 5px}
 details summary{cursor:pointer;font-weight:900}
 hr{border:0;border-top:1px solid #263247;margin:16px 0}
 .footer{text-align:center;color:#64748b;font-size:11px;padding:10px}
+/* --- 通知設定まわり --- */
+.switchrow{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0 4px}
+.switch{position:relative;display:inline-block;width:56px;height:32px;flex:0 0 auto;margin:0}
+.switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;z-index:2}
+.slider{position:absolute;inset:0;background:#334155;border-radius:999px;transition:.2s}
+.slider:before{content:"";position:absolute;width:26px;height:26px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked+.slider{background:var(--accent)}
+.switch input:checked+.slider:before{transform:translateX(24px)}
+.ngrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.status{font-size:12px;line-height:1.6;color:#cbd5e1;background:#0b1220;border:1px solid #253247;border-radius:14px;padding:10px 12px;margin-bottom:4px}
+.notice{margin-top:12px;font-size:12px;line-height:1.7;color:var(--muted)}
+.notice summary{color:#cbd5e1;font-size:13px}
+.notice ul{margin:8px 0 0;padding-left:18px}
+.notice li{margin-bottom:5px}
+.notice b{color:#e2e8f0}
 </style>
 </head>
 <body>
@@ -149,6 +173,40 @@ hr{border:0;border-top:1px solid #263247;margin:16px 0}
       <button class="dark" style="width:100%;margin-top:12px" onclick="saveSettings()">設定を保存</button>
       <button class="danger" style="width:100%;margin-top:8px" onclick="resetToday()">今日の記録をリセット</button>
     </details>
+  </div>
+
+  <div class="card" id="notifyCard">
+    <div class="section-title">通知設定 🔔</div>
+    <div class="status" id="notifyStatus">確認中…</div>
+
+    <div class="switchrow">
+      <div>
+        <div style="font-weight:900">毎日の通知</div>
+        <div class="small">決めた時刻に関西弁で煽るで。</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="notifyOn"><span class="slider"></span></label>
+    </div>
+
+    <label>通知する時刻</label>
+    <input id="notifyTime" type="time" value="20:00">
+
+    <button class="primary" id="notifyPermBtn" style="width:100%;margin-top:12px">通知を許可する 🔔</button>
+    <div class="ngrid">
+      <button class="dark" id="notifySaveBtn">通知設定を保存</button>
+      <button class="dark" id="notifyTestBtn">テスト通知</button>
+    </div>
+
+    <div class="notice">
+      <details>
+        <summary>⚠️ iPhoneでの通知の限界（大事）</summary>
+        <ul>
+          <li><b>できること</b>：ホーム画面に追加したうえで、アプリを開いている／裏で生きている間なら、設定時刻に通知が出るで。</li>
+          <li><b>できること</b>：時刻を過ぎてからアプリを開いたら、その場で「まだ運動してへんで？」と1回だけ言うで（追いかけ通知）。</li>
+          <li><b>できひんこと</b>：アプリを完全に閉じた状態から、Webだけで毎日自動的に通知を出すことは<b>できひん</b>。iOSにはWebページを時刻で起こす仕組みが無くて、それをやるにはプッシュ配信サーバーが要る（GitHub Pagesは静的サイトなので置けへん）。</li>
+          <li><b>確実に毎日鳴らしたいなら</b>：iPhoneの「ショートカット」アプリ →「オートメーション」→「時刻」→ 毎日◯時 →「Appを開く」で<b>動きやー</b>を指定。開いた瞬間にこのアプリが煽ってくれるで。</li>
+        </ul>
+      </details>
+    </div>
   </div>
 
   <div class="footer">ホーム画面に追加して毎日開いたら、容赦なく言うで。</div>
@@ -289,6 +347,256 @@ function resetToday(){
   }
 }
 nagMe();render();
+</script>
+<script>
+/* ===== PWA / 通知（既存ロジックには手を入れず、上に足すだけ） ===== */
+(function(){
+  "use strict";
+
+  var NKEY = "ugokiya_notify_v1";
+  var DEFAULTS = { enabled:false, time:"20:00", last:null };
+
+  /* 関西弁の煽り文（ランダムで1つ選ぶ） */
+  var MSGS = [
+    ["動きやー！🏃", "まだ運動してへんで？"],
+    ["動きやー！🏃", "10分だけでも動きやー。"],
+    ["動きやー！🏃", "スマホ置いて歩いてきーや。"],
+    ["おい、そこの人🫵", "今日まだ0分ちゃうか？"],
+    ["時間やで⏰", "ソファから立つとこまではできるやろ。"],
+    ["動きやー！🔥", "スクロールする元気あるなら歩けるで。"],
+    ["ちょっとええか？😏", "『あとで』はだいたいやらんやつやで。"],
+    ["連続記録、切れてまうで🔥", "5分でもええから動いとこ。"],
+    ["はい、運動の時間です🫡", "言い訳は聞かへんで。"]
+  ];
+
+  function loadN(){
+    try{
+      var o = JSON.parse(localStorage.getItem(NKEY)) || {};
+      return { enabled: !!o.enabled, time: o.time || DEFAULTS.time, last: o.last || null };
+    }catch(e){ return { enabled:false, time:DEFAULTS.time, last:null }; }
+  }
+  function saveN(n){ try{ localStorage.setItem(NKEY, JSON.stringify(n)); }catch(e){} }
+
+  function hasNotif(){ return (typeof window !== "undefined") && ("Notification" in window); }
+  function hasSW(){ return ("serviceWorker" in navigator) && location.protocol !== "file:"; }
+  function perm(){ return hasNotif() ? Notification.permission : "unsupported"; }
+  function isIOS(){
+    var ua = navigator.userAgent || "";
+    return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+  function isStandalone(){
+    try{
+      return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+             navigator.standalone === true;
+    }catch(e){ return false; }
+  }
+  function dayKey(){
+    try{ return keyOf(); }catch(e){
+      var d = new Date();
+      return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+    }
+  }
+  function minutesToday(){
+    try{ return (state.records[keyOf()] || {}).minutes || 0; }catch(e){ return 0; }
+  }
+  function goalNow(){
+    try{ return state.goal || 20; }catch(e){ return 20; }
+  }
+  function say(t){ try{ toast(t); }catch(e){} }
+  function parseTime(t){
+    var m = /^(\d{1,2}):(\d{2})$/.exec(String(t||""));
+    if(!m) return null;
+    var h = +m[1], mi = +m[2];
+    if(h<0||h>23||mi<0||mi>59) return null;
+    return { h:h, mi:mi };
+  }
+  function targetToday(n){
+    var t = parseTime(n.time); if(!t) return null;
+    var d = new Date(); d.setHours(t.h, t.mi, 0, 0); return d;
+  }
+
+  /* ---- Service Worker 登録（失敗しても本体は動く） ---- */
+  var swReg = null;
+  function getReg(){
+    if(swReg) return Promise.resolve(swReg);
+    if(!hasSW()) return Promise.resolve(null);
+    return Promise.race([
+      navigator.serviceWorker.ready.then(function(r){ swReg = r; return r; }),
+      new Promise(function(res){ setTimeout(function(){ res(null); }, 3000); })
+    ]).catch(function(){ return null; });
+  }
+  if(hasSW()){
+    window.addEventListener("load", function(){
+      navigator.serviceWorker.register("./service-worker.js")
+        .then(function(r){ swReg = r; })
+        .catch(function(){ /* 未対応/オフライン等。無視 */ })
+        .then(updateUI);
+    });
+  }
+
+  /* ---- 通知を出す（出せたら true） ---- */
+  function fire(msg){
+    if(perm() !== "granted") return Promise.resolve(false);
+    var opts = {
+      body: msg[1],
+      icon: "./icons/icon-192.png",
+      badge: "./icons/icon-192.png",
+      tag: "ugokiya-daily",
+      renotify: true,
+      data: { url: "./index.html" }
+    };
+    return getReg().then(function(reg){
+      if(reg && reg.showNotification){
+        return reg.showNotification(msg[0], opts).then(function(){ return true; });
+      }
+      // SWが無い環境向けフォールバック（iOSでは例外になるのでcatchで拾う）
+      new Notification(msg[0], opts);
+      return true;
+    }).catch(function(){ return false; });
+  }
+
+  /* ---- 通知が出せへん時は、画面の中で煽る ---- */
+  function inAppNag(msg){
+    try{
+      document.getElementById("face").textContent = "🫵";
+      document.getElementById("nag").textContent = msg[0].replace(/[🏃🫵⏰🔥😏🫡]/g,"").trim() || "動きやー！";
+      document.getElementById("submsg").textContent = msg[1];
+    }catch(e){}
+    say(msg[1]);
+  }
+
+  function pick(){ return MSGS[Math.floor(Math.random()*MSGS.length)]; }
+
+  /* ---- 予定時刻を過ぎてたら1日1回だけ煽る ---- */
+  function tick(){
+    var n = loadN();
+    if(!n.enabled) return;
+    var tg = targetToday(n);
+    if(!tg) return;
+    if(new Date() < tg) return;
+    if(n.last === dayKey()) return;
+
+    n.last = dayKey(); saveN(n);
+
+    // 今日もう目標達成してるなら煽らへん
+    if(minutesToday() >= goalNow()) return;
+
+    var msg = pick();
+    fire(msg).then(function(ok){ if(!ok) inAppNag(msg); });
+  }
+
+  var armed = null;
+  function arm(){
+    if(armed){ clearTimeout(armed); armed = null; }
+    var n = loadN();
+    if(!n.enabled) return;
+    var tg = targetToday(n);
+    if(!tg) return;
+    var ms = tg.getTime() - Date.now();
+    if(ms < 0) ms += 86400000;               // 次の日の同時刻
+    if(ms > 86400000) return;
+    armed = setTimeout(function(){ tick(); arm(); }, ms + 1000);
+  }
+
+  /* ---- UI ---- */
+  function el(id){ return document.getElementById(id); }
+
+  function updateUI(){
+    var n = loadN();
+    var st = el("notifyStatus"), btn = el("notifyPermBtn");
+    if(!st || !btn) return;
+    if(el("notifyOn")) el("notifyOn").checked = n.enabled;
+    if(el("notifyTime")) el("notifyTime").value = n.time;
+
+    var s, showBtn = false;
+    if(!hasNotif()){
+      s = "⚠️ この端末やブラウザは通知に対応してへん。アプリを開いた時に画面で煽るモードで動くで。";
+    }else if(isIOS() && !isStandalone()){
+      s = "📲 iPhoneは先に「共有 → ホーム画面に追加」してな。そこから開かんと通知は使われへん。";
+    }else if(perm() === "granted"){
+      s = n.enabled ? ("✅ 通知ON。毎日 " + n.time + " ごろに煽るで（アプリが生きてる時／次に開いた時）。")
+                    : "✅ 通知は許可済み。あとは上のスイッチをONにするだけや。";
+    }else if(perm() === "denied"){
+      s = "🚫 通知がブロックされてるわ。iPhoneなら「設定 → 通知 → 動きやー」から許可してな。";
+    }else{
+      s = "🔔 まだ通知の許可を取ってへん。下のボタン押してや。";
+      showBtn = true;
+    }
+    st.textContent = s;
+    btn.style.display = showBtn ? "" : "none";
+  }
+
+  function askPermission(){
+    if(!hasNotif()){ say("この端末は通知に対応してへんわ"); updateUI(); return; }
+    if(isIOS() && !isStandalone()){ say("先にホーム画面に追加してや"); updateUI(); return; }
+    var done = function(p){
+      if(!p) p = perm();
+      if(p === "granted"){
+        var n = loadN(); n.enabled = true; saveN(n);
+        say("通知OKや！🔔");
+      }else{
+        say("通知は許可されへんかったわ");
+      }
+      updateUI(); arm();
+    };
+    try{
+      var r = Notification.requestPermission(function(p){ done(p); });
+      if(r && typeof r.then === "function"){ r.then(done).catch(function(){ done(null); }); }
+    }catch(e){ done(null); }
+  }
+
+  function persist(showToast){
+    var n = loadN();
+    var on = el("notifyOn") ? el("notifyOn").checked : false;
+    var tv = el("notifyTime") ? el("notifyTime").value : n.time;
+    if(!parseTime(tv)){ tv = n.time; if(el("notifyTime")) el("notifyTime").value = tv; }
+    var changed = (n.time !== tv) || (n.enabled !== on);
+    n.enabled = on; n.time = tv;
+    if(changed){
+      var tg = targetToday(n);
+      // 保存した時点でもう過ぎてる時刻なら、いきなり鳴らさず明日から
+      n.last = (tg && new Date() >= tg) ? dayKey() : null;
+    }
+    saveN(n);
+    updateUI(); arm();
+    if(showToast){
+      say(on ? ("毎日 " + tv + " に通知するで") : "通知OFFにしたで");
+    }
+  }
+
+  function testNotify(){
+    var msg = pick();
+    if(perm() !== "granted"){
+      inAppNag(msg);
+      say(hasNotif() ? "通知が許可されてへんから画面で煽っといたで" : "通知未対応やから画面で煽っといたで");
+      return;
+    }
+    fire(msg).then(function(ok){
+      if(ok) say("テスト通知出したで🔔");
+      else { inAppNag(msg); say("通知出されへんかったから画面で煽っといた"); }
+    });
+  }
+
+  function init(){
+    if(el("notifyPermBtn")) el("notifyPermBtn").addEventListener("click", askPermission);
+    if(el("notifySaveBtn")) el("notifySaveBtn").addEventListener("click", function(){ persist(true); });
+    if(el("notifyTestBtn")) el("notifyTestBtn").addEventListener("click", testNotify);
+    if(el("notifyOn")) el("notifyOn").addEventListener("change", function(){ persist(true); });
+    if(el("notifyTime")) el("notifyTime").addEventListener("change", function(){ persist(true); });
+
+    updateUI();
+    arm();
+    tick();                                   // 開いた瞬間の「追いかけ通知」
+    setInterval(tick, 30000);                 // 開いてる間の見張り
+    document.addEventListener("visibilitychange", function(){
+      if(!document.hidden){ tick(); arm(); updateUI(); }
+    });
+    window.addEventListener("focus", function(){ tick(); });
+  }
+
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
 </script>
 </body>
 </html>
