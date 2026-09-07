@@ -178,6 +178,7 @@ hr{border:0;border-top:1px solid #263247;margin:16px 0}
   <div class="card" id="notifyCard">
     <div class="section-title">通知設定 🔔</div>
     <div class="status" id="notifyStatus">確認中…</div>
+    <div class="status" id="pushStatus">サーバー通知：確認中…</div>
 
     <div class="switchrow">
       <div>
@@ -198,13 +199,15 @@ hr{border:0;border-top:1px solid #263247;margin:16px 0}
 
     <div class="notice">
       <details>
-        <summary>⚠️ iPhoneでの通知の限界（大事）</summary>
+        <summary>📱 iPhoneで「閉じてても届く」ようにする条件</summary>
         <ul>
-          <li><b>できること</b>：ホーム画面に追加したうえで、アプリを開いている／裏で生きている間なら、設定時刻に通知が出るで。</li>
-          <li><b>できること</b>：時刻を過ぎてからアプリを開いたら、その場で「まだ運動してへんで？」と1回だけ言うで（追いかけ通知）。</li>
-          <li><b>できひんこと</b>：アプリを完全に閉じた状態から、Webだけで毎日自動的に通知を出すことは<b>できひん</b>。iOSにはWebページを時刻で起こす仕組みが無くて、それをやるにはプッシュ配信サーバーが要る（GitHub Pagesは静的サイトなので置けへん）。</li>
-          <li><b>確実に毎日鳴らしたいなら</b>：iPhoneの「ショートカット」アプリ →「オートメーション」→「時刻」→ 毎日◯時 →「Appを開く」で<b>動きやー</b>を指定。開いた瞬間にこのアプリが煽ってくれるで。</li>
+          <li><b>必須</b>：Safariで開いて「共有 → ホーム画面に追加」。<b>そのアイコンから開いた時だけ</b>通知を登録できる。Safariのタブのままでは許可すら求められへん。</li>
+          <li><b>必須</b>：iOS 16.4以上。</li>
+          <li>上の条件を満たして通知を許可したら、<b>アプリを完全に閉じてても</b>設定した時刻に届くで。サーバー（Supabase）から送っとるからや。</li>
+          <li>その日もう目標分数まで運動しとったら、通知は<b>送られへん</b>。煽る必要ないからな。</li>
+          <li>すでにホーム画面に追加済みやのに登録に失敗する時は、<b>一回アイコンを消してから追加し直し</b>てみてや。古い状態が残っとることがある。</li>
         </ul>
+      </details>
       </details>
     </div>
   </div>
@@ -639,6 +642,15 @@ nagMe();render();
   var lastDaySnap = null; // 今日の記録の見張り用スナップショット
   var lastSetSnap = null; // 設定の見張り用スナップショット
 
+  /* ログイン完了を他モジュール（プッシュ通知）から待てるようにする */
+  var readyResolve, readyReject;
+  var readyPromise = new Promise(function(res, rej){ readyResolve = res; readyReject = rej; });
+  readyPromise.catch(function(){});   // 誰も待っていない場合の未処理拒否を防ぐ
+  window.UgokiyaSync = {
+    ready:   function(){ return readyPromise; },
+    syncNow: function(){ return syncAll(); }
+  };
+
   function el(id){ return document.getElementById(id); }
   function setStatus(t){ var e = el("syncStatus"); if(e) e.textContent = t; }
   function hhmm(){
@@ -840,6 +852,7 @@ nagMe();render();
       if(!session || !session.user) throw new Error("セッションが取れへんかった");
       uid = session.user.id;
       ready = true;
+      readyResolve({ sb: sb, uid: uid });
     });
   }
 
@@ -854,10 +867,12 @@ nagMe();render();
 
     if(!configured()){
       setStatus("未設定：index.html の SUPABASE_URL と SUPABASE_PUBLISHABLE_KEY を書き換えてな。");
+      readyReject(new Error("Supabase未設定"));
       return;
     }
     if(typeof window.supabase === "undefined" || !window.supabase.createClient){
       setStatus("ライブラリが読み込めへんかった（ネット確認してな）。記録はこの端末には残っとる。");
+      readyReject(new Error("supabase-jsが読み込めていない"));
       return;
     }
 
@@ -868,16 +883,187 @@ nagMe();render();
       });
     }catch(e){
       setStatus("接続の設定がおかしいで：" + (e.message || e));
+      readyReject(e);
       return;
     }
 
     signIn().then(syncAll).catch(function(err){
       setStatus("ログインでけへんかった：" + (err.message || err) + "（匿名ログインON？）");
+      readyReject(err);
     });
 
     window.addEventListener("online", function(){ if(dirty) syncAll(); });
     document.addEventListener("visibilitychange", function(){
       if(!document.hidden && ready && dirty) syncAll();
+    });
+  }
+
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
+</script>
+<script>
+/* ===== Web Push 購読（既存の通知ロジックには手を入れず、上に足すだけ） =====
+   ・アプリを閉じていてもサーバーから通知を届けるための「宛先」を登録する。
+   ・登録できひん環境（iOSのSafariタブ等）では黙って既存のアプリ内煽りに任せる。
+*/
+(function(){
+  "use strict";
+
+  var VAPID_PUBLIC_KEY = "BJ_LqqkiPFuCcCCBf6htPvzPlR1yOApYQNC-x4VYwS9-m-JpLv2hVM160o-9xAe2uww___weMdnqKudLLSdar1I";
+  var NKEY = "ugokiya_notify_v1";   // 既存の通知設定と同じ保存先を読む
+
+  var sb = null, uid = null;
+  var lastSent = null;              // 同じ内容を何度も送らんための記録
+
+  function el(id){ return document.getElementById(id); }
+  function setStatus(t){ var e = el("pushStatus"); if(e) e.textContent = t; }
+
+  function hasPush(){
+    return ("serviceWorker" in navigator) &&
+           ("PushManager" in window) &&
+           ("Notification" in window) &&
+           location.protocol !== "file:";
+  }
+  function isIOS(){
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+           (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+  function isStandalone(){
+    return (window.navigator.standalone === true) ||
+           (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+  }
+  function loadN(){
+    try{
+      var o = JSON.parse(localStorage.getItem(NKEY)) || {};
+      return { enabled: !!o.enabled, time: o.time || "20:00" };
+    }catch(e){ return { enabled:false, time:"20:00" }; }
+  }
+  function tz(){
+    try{
+      var t = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      return t || "Asia/Tokyo";
+    }catch(e){ return "Asia/Tokyo"; }
+  }
+
+  /* base64url の公開鍵を Uint8Array に変換（subscribeが要求する形式） */
+  function toKeyBytes(b64){
+    var pad = "=".repeat((4 - b64.length % 4) % 4);
+    var s = (b64 + pad).replace(/-/g, "+").replace(/_/g, "/");
+    var raw = atob(s);
+    var out = new Uint8Array(raw.length);
+    for(var i=0;i<raw.length;i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  /* ---- 購読を作る（既にあれば使い回す） ---- */
+  function getSubscription(){
+    return navigator.serviceWorker.ready.then(function(reg){
+      return reg.pushManager.getSubscription().then(function(sub){
+        if(sub) return sub;
+        return reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: toKeyBytes(VAPID_PUBLIC_KEY)
+        });
+      });
+    });
+  }
+
+  /* ---- 宛先をSupabaseに保存 ---- */
+  function saveSubscription(sub){
+    var j = sub.toJSON();
+    if(!j || !j.endpoint || !j.keys || !j.keys.p256dh || !j.keys.auth){
+      return Promise.reject(new Error("購読情報が不完全"));
+    }
+    return sb.from("push_subscriptions").upsert({
+      endpoint:   j.endpoint,
+      user_id:    uid,
+      p256dh:     j.keys.p256dh,
+      auth:       j.keys.auth,
+      user_agent: String(navigator.userAgent || "").slice(0, 300),
+      fail_count: 0,
+      last_ok_at: new Date().toISOString()
+    }, { onConflict: "endpoint" }).then(function(r){
+      if(r.error) throw r.error;
+      return j.endpoint;
+    });
+  }
+
+  /* ---- 通知設定（ON/OFF・時刻・タイムゾーン）をサーバーに反映 ---- */
+  function saveNotifySettings(n){
+    return sb.from("settings").upsert({
+      user_id:        uid,
+      notify_enabled: !!n.enabled,
+      notify_time:    n.time,
+      timezone:       tz()
+    }, { onConflict: "user_id" }).then(function(r){
+      if(r.error) throw r.error;
+    });
+  }
+
+  /* ---- 現状に合わせて登録／解除する ---- */
+  function apply(){
+    if(!sb || !uid) return Promise.resolve();
+    var n = loadN();
+    var sig = JSON.stringify([n.enabled, n.time, tz(), Notification.permission]);
+    if(sig === lastSent) return Promise.resolve();
+
+    if(!n.enabled){
+      lastSent = sig;
+      return saveNotifySettings(n).then(function(){
+        setStatus("サーバー通知はOFF。スイッチを入れたら、閉じてても届くようになるで。");
+      }).catch(function(e){
+        setStatus("設定を送れへんかった：" + (e.message || e));
+      });
+    }
+
+    if(Notification.permission !== "granted"){
+      setStatus("🔔 まず上のボタンで通知を許可してな。許可したらサーバーからも届くようになるで。");
+      return saveNotifySettings({ enabled:false, time:n.time }).catch(function(){});
+    }
+
+    return getSubscription()
+      .then(saveSubscription)
+      .then(function(){ return saveNotifySettings(n); })
+      .then(function(){
+        lastSent = sig;
+        setStatus("✅ サーバー通知が有効。アプリ閉じてても " + n.time + " ごろに届くで。");
+      })
+      .catch(function(e){
+        lastSent = null;
+        setStatus("サーバー通知の登録に失敗：" + (e.message || e));
+      });
+  }
+
+  function init(){
+    if(!hasPush()){
+      setStatus("この端末はサーバー通知に未対応。アプリを開いた時の煽りだけ動くで。");
+      return;
+    }
+    if(isIOS() && !isStandalone()){
+      setStatus("📲 iPhoneは「共有 → ホーム画面に追加」してから、そのアイコンで開いてな。Safariのタブでは登録でけへん。");
+      return;
+    }
+
+    setStatus("サーバー通知の準備中…");
+
+    window.UgokiyaSync.ready().then(function(ctx){
+      sb = ctx.sb; uid = ctx.uid;
+      return apply();
+    }).catch(function(e){
+      setStatus("Supabaseにつながらんかったから、サーバー通知は保留や：" + (e.message || e));
+    });
+
+    /* 既存のハンドラが走ったあとに、こちらも追従する */
+    ["notifyOn","notifyTime","notifySaveBtn","notifyPermBtn"].forEach(function(id){
+      var e = el(id);
+      if(!e) return;
+      var ev = (id === "notifySaveBtn" || id === "notifyPermBtn") ? "click" : "change";
+      e.addEventListener(ev, function(){ setTimeout(apply, 400); });
+    });
+
+    document.addEventListener("visibilitychange", function(){
+      if(!document.hidden) apply();
     });
   }
 
