@@ -209,6 +209,23 @@ hr{border:0;border-top:1px solid #263247;margin:16px 0}
     </div>
   </div>
 
+  <div class="card" id="syncCard">
+    <div class="section-title">クラウド同期 ☁️</div>
+    <div class="status" id="syncStatus">確認中…</div>
+    <button class="dark" id="syncNowBtn" style="width:100%;margin-top:10px">今すぐ同期</button>
+
+    <div class="notice">
+      <details>
+        <summary>同期のしくみ（読んどいて）</summary>
+        <ul>
+          <li><b>まずこの端末に保存</b>してから、Supabaseに送っとる。オフラインでも今までどおり使えるし、つながったときにまとめて送るで。</li>
+          <li>ログインは<b>匿名</b>や。この端末専用のIDが自動で作られて、他人にはデータは見えへん（Supabase側のRLSで弾いとる）。</li>
+          <li>逆に言うと<b>別の端末で開いたら別人扱い</b>になる。ブラウザのデータを消しても同じく別人や。機種変で引き継ぎたいなら、あとからメールログインを足す必要があるで。</li>
+        </ul>
+      </details>
+    </div>
+  </div>
+
   <div class="footer">ホーム画面に追加して毎日開いたら、容赦なく言うで。</div>
 </div>
 <div class="toast" id="toast">記録したで！</div>
@@ -592,6 +609,276 @@ nagMe();render();
       if(!document.hidden){ tick(); arm(); updateUI(); }
     });
     window.addEventListener("focus", function(){ tick(); });
+  }
+
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.115.0/dist/umd/supabase.min.js"></script>
+<script>
+/* ===== Supabase同期（既存ロジックには手を入れず、上に足すだけ） =====
+   ・保存先はこれまでどおりlocalStorageが主。そのコピーをSupabaseに置いとくだけ。
+   ・つながらんときは黙ってローカル運用に戻り、復帰したら送り直す。
+*/
+(function(){
+  "use strict";
+
+  /* ▼▼▼ ここ2行だけ自分の値に書き換える ▼▼▼ */
+  var SUPABASE_URL             = "https://qwnyyaikgzbamvmpnygg.supabase.co";
+  var SUPABASE_PUBLISHABLE_KEY = "sb_publishable_hg8lVrNUjXbcaGyX5eenTA_oR56U634";
+  /* ▲▲▲ ここまで ▲▲▲ */
+
+  var sb = null;          // Supabaseクライアント
+  var uid = null;         // 匿名ユーザーのID
+  var ready = false;      // ログイン済みか
+  var busy = false;       // 同期処理が走っとる最中か
+  var dirty = false;      // 送りそびれた変更があるか
+  var timer = null;       // 送信のまとめ待ち
+  var quiet = false;      // pull適用中（自分の書き戻しでpushしないため）
+  var lastDaySnap = null; // 今日の記録の見張り用スナップショット
+  var lastSetSnap = null; // 設定の見張り用スナップショット
+
+  function el(id){ return document.getElementById(id); }
+  function setStatus(t){ var e = el("syncStatus"); if(e) e.textContent = t; }
+  function hhmm(){
+    var d = new Date();
+    return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
+  }
+  function configured(){
+    return SUPABASE_URL.indexOf("YOUR-PROJECT-REF") < 0 &&
+           SUPABASE_PUBLISHABLE_KEY.indexOf("XXXX") < 0;
+  }
+  function isDayKey(k){ return /^\d{4}-\d{2}-\d{2}$/.test(k); }
+
+  /* --- 変更検知用のスナップショット --- */
+  function daySnap(){
+    try{
+      var k = keyOf(), r = state.records[k] || {};
+      return JSON.stringify([k, r.minutes|0, r.items||[]]);
+    }catch(e){ return ""; }
+  }
+  function setSnap(){
+    try{ return JSON.stringify([state.goal||20, state.level||2]); }catch(e){ return ""; }
+  }
+
+  /* --- 既存のsave()を包んで「変わったら送る」--- */
+  var rawSave = window.save;
+  window.save = function(){
+    rawSave();
+    if(quiet) return;
+    var d = daySnap(), s = setSnap();
+    var dayChanged = (d !== lastDaySnap);
+    var setChanged = (s !== lastSetSnap);
+    if(!dayChanged && !setChanged) return;
+
+    if(dayChanged) stampToday();
+    if(setChanged) state.settingsUpdatedAt = new Date().toISOString();
+    lastDaySnap = d; lastSetSnap = s;
+    rawSave();
+    dirty = true;
+    schedulePush();
+  };
+
+  function stampToday(){
+    try{
+      var k = keyOf();
+      if(!state.records[k]) state.records[k] = { minutes:0, items:[] };
+      state.records[k].updatedAt = new Date().toISOString();
+    }catch(e){}
+  }
+
+  function schedulePush(){
+    if(timer) clearTimeout(timer);
+    timer = setTimeout(function(){ timer = null; push(); }, 800);
+  }
+
+  /* --- Supabaseに送る行を組み立てる --- */
+  function rowFor(day, rec){
+    if(!rec.updatedAt) rec.updatedAt = new Date().toISOString();
+    return {
+      user_id: uid,
+      day: day,
+      minutes: rec.minutes|0,
+      items: rec.items || [],
+      updated_at: rec.updatedAt
+    };
+  }
+
+  /* --- 取ってくる：リモートのほうが新しい日だけ手元に反映 --- */
+  function pull(){
+    return Promise.all([
+      sb.from("records").select("day,minutes,items,updated_at"),
+      sb.from("settings").select("goal,level,updated_at").maybeSingle()
+    ]).then(function(res){
+      var r = res[0], s = res[1];
+      if(r.error) throw r.error;
+      if(s.error) throw s.error;
+
+      var remote = {}, changed = false;
+      (r.data || []).forEach(function(row){
+        remote[row.day] = row;
+        var local = state.records[row.day];
+        var lt = (local && local.updatedAt) ? Date.parse(local.updatedAt) : -1;
+        var rt = Date.parse(row.updated_at) || 0;
+        if(!local || rt > lt){
+          state.records[row.day] = {
+            minutes: row.minutes|0,
+            items: row.items || [],
+            updatedAt: row.updated_at
+          };
+          changed = true;
+        }
+      });
+
+      if(s.data){
+        var st  = Date.parse(s.data.updated_at) || 0;
+        var lst = state.settingsUpdatedAt ? Date.parse(state.settingsUpdatedAt) : -1;
+        if(st > lst){
+          state.goal  = s.data.goal;
+          state.level = s.data.level;
+          state.settingsUpdatedAt = s.data.updated_at;
+          changed = true;
+        }
+      }
+
+      if(changed){
+        quiet = true;
+        try{ render(); }catch(e){ rawSave(); }
+        quiet = false;
+        lastDaySnap = daySnap(); lastSetSnap = setSnap();
+      }
+      return remote;
+    });
+  }
+
+  /* --- 送る：手元のほうが新しい日だけ上書き --- */
+  function pushDiff(remote){
+    var rows = [];
+    Object.keys(state.records || {}).forEach(function(day){
+      if(!isDayKey(day)) return;
+      var rec = state.records[day];
+      if(!rec) return;
+      var rem = remote[day];
+      var lt = rec.updatedAt ? Date.parse(rec.updatedAt) : 0;
+      var rt = rem ? (Date.parse(rem.updated_at) || 0) : -1;
+      if(!rem || lt > rt) rows.push(rowFor(day, rec));
+    });
+
+    var jobs = [];
+    if(rows.length){
+      jobs.push(sb.from("records").upsert(rows, { onConflict: "user_id,day" }));
+    }
+    if(!state.settingsUpdatedAt) state.settingsUpdatedAt = new Date().toISOString();
+    jobs.push(sb.from("settings").upsert({
+      user_id: uid,
+      goal: state.goal || 20,
+      level: state.level || 2,
+      updated_at: state.settingsUpdatedAt
+    }, { onConflict: "user_id" }));
+
+    return Promise.all(jobs).then(function(out){
+      for(var i=0;i<out.length;i++){ if(out[i] && out[i].error) throw out[i].error; }
+      rawSave();
+    });
+  }
+
+  function push(){
+    if(!ready || busy){ dirty = true; return Promise.resolve(); }
+    busy = true;
+    var today = keyOf();
+    var rec = state.records[today] || { minutes:0, items:[] };
+    var rows = [rowFor(today, rec)];
+    if(!state.settingsUpdatedAt) state.settingsUpdatedAt = new Date().toISOString();
+
+    return Promise.all([
+      sb.from("records").upsert(rows, { onConflict: "user_id,day" }),
+      sb.from("settings").upsert({
+        user_id: uid,
+        goal: state.goal || 20,
+        level: state.level || 2,
+        updated_at: state.settingsUpdatedAt
+      }, { onConflict: "user_id" })
+    ]).then(function(out){
+      for(var i=0;i<out.length;i++){ if(out[i] && out[i].error) throw out[i].error; }
+      dirty = false;
+      setStatus("同期済み " + hhmm() + " ☁️");
+    }).catch(function(err){
+      dirty = true;
+      setStatus(navigator.onLine ? ("送られへんかった：" + (err.message || err)) : "オフライン。つながったら送るで");
+    }).then(function(){ busy = false; });
+  }
+
+  /* --- 全体同期（起動時と「今すぐ同期」ボタン） --- */
+  function syncAll(){
+    if(!ready || busy) return Promise.resolve();
+    busy = true;
+    setStatus("同期中…");
+    return pull()
+      .then(pushDiff)
+      .then(function(){
+        dirty = false;
+        setStatus("同期済み " + hhmm() + " ☁️");
+      })
+      .catch(function(err){
+        dirty = true;
+        setStatus(navigator.onLine ? ("同期でけへんかった：" + (err.message || err)) : "オフライン。つながったら送るで");
+      })
+      .then(function(){ busy = false; });
+  }
+
+  /* --- 匿名ログイン --- */
+  function signIn(){
+    return sb.auth.getSession().then(function(g){
+      var session = g.data && g.data.session;
+      if(session) return session;
+      return sb.auth.signInAnonymously().then(function(a){
+        if(a.error) throw a.error;
+        return a.data.session;
+      });
+    }).then(function(session){
+      if(!session || !session.user) throw new Error("セッションが取れへんかった");
+      uid = session.user.id;
+      ready = true;
+    });
+  }
+
+  function init(){
+    lastDaySnap = daySnap(); lastSetSnap = setSnap();
+
+    var btn = el("syncNowBtn");
+    if(btn) btn.addEventListener("click", function(){
+      if(!ready){ setStatus("まだつながってへん。少し待ってからもう一回。"); return; }
+      syncAll();
+    });
+
+    if(!configured()){
+      setStatus("未設定：index.html の SUPABASE_URL と SUPABASE_PUBLISHABLE_KEY を書き換えてな。");
+      return;
+    }
+    if(typeof window.supabase === "undefined" || !window.supabase.createClient){
+      setStatus("ライブラリが読み込めへんかった（ネット確認してな）。記録はこの端末には残っとる。");
+      return;
+    }
+
+    setStatus("つないでる…");
+    try{
+      sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+        auth: { persistSession: true, autoRefreshToken: true, storageKey: "ugokiya_auth" }
+      });
+    }catch(e){
+      setStatus("接続の設定がおかしいで：" + (e.message || e));
+      return;
+    }
+
+    signIn().then(syncAll).catch(function(err){
+      setStatus("ログインでけへんかった：" + (err.message || err) + "（匿名ログインON？）");
+    });
+
+    window.addEventListener("online", function(){ if(dirty) syncAll(); });
+    document.addEventListener("visibilitychange", function(){
+      if(!document.hidden && ready && dirty) syncAll();
+    });
   }
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
