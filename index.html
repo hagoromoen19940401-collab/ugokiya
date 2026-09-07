@@ -219,6 +219,14 @@ hr{border:0;border-top:1px solid #263247;margin:16px 0}
 
     <div class="notice">
       <details>
+        <summary>🔧 診断（うまくいかん時に見る）</summary>
+        <pre id="diagBox" style="white-space:pre-wrap;font-size:11px;line-height:1.7;color:#cbd5e1;margin:8px 0 0">取得中…</pre>
+        <button class="dark" id="reauthBtn" style="width:100%;margin-top:10px;font-size:13px;padding:11px">トークンを取り直す</button>
+      </details>
+    </div>
+
+    <div class="notice">
+      <details>
         <summary>同期のしくみ（読んどいて）</summary>
         <ul>
           <li><b>まずこの端末に保存</b>してから、Supabaseに送っとる。オフラインでも今までどおり使えるし、つながったときにまとめて送るで。</li>
@@ -642,13 +650,107 @@ nagMe();render();
   var lastDaySnap = null; // 今日の記録の見張り用スナップショット
   var lastSetSnap = null; // 設定の見張り用スナップショット
 
+  /* --- JWTの中身を見る（署名検証はしない。診断用） --- */
+  function decodeJwt(t){
+    try{
+      var p = String(t).split(".")[1].replace(/-/g,"+").replace(/_/g,"/");
+      p += "=".repeat((4 - p.length % 4) % 4);
+      return JSON.parse(atob(p));
+    }catch(e){ return null; }
+  }
+
+  var diag = { skew:null, iat:null, exp:null, refreshed:0, lastAuthErr:null };
+
+  function noteToken(session){
+    if(!session || !session.access_token) return;
+    var c = decodeJwt(session.access_token);
+    if(!c) return;
+    diag.iat = c.iat || null;
+    diag.exp = c.exp || null;
+    // 正なら端末がサーバーより進んでいる
+    if(c.iat) diag.skew = Math.round(Date.now()/1000 - c.iat);
+    renderDiag();
+  }
+
+  function renderDiag(){
+    var e = el("diagBox");
+    if(!e) return;
+    var lines = [];
+    if(diag.skew === null){
+      lines.push("端末とサーバーの時刻差：未取得");
+    }else{
+      var s = diag.skew;
+      lines.push("端末とサーバーの時刻差：" + (s>0?"+":"") + s + "秒" +
+                 (Math.abs(s) > 30 ? "　⚠️ ズレすぎ" : "　（正常）"));
+    }
+    if(diag.iat) lines.push("トークン発行時刻(iat)：" + new Date(diag.iat*1000).toLocaleString());
+    if(diag.exp) lines.push("トークン有効期限(exp)：" + new Date(diag.exp*1000).toLocaleString());
+    lines.push("トークン再取得の回数：" + diag.refreshed);
+    if(diag.lastAuthErr) lines.push("直近の認証エラー：" + diag.lastAuthErr);
+    lines.push("端末の現在時刻：" + new Date().toLocaleString());
+    e.textContent = lines.join("\n");
+  }
+
+  /* --- 認証まわりのエラーか判定して、トークンを取り直して1回だけやり直す --- */
+  function isAuthError(err){
+    if(!err) return false;
+    var m = ((err.message||"") + " " + (err.code||"") + " " + (err.hint||"") + " " + (err.details||"")).toLowerCase();
+    return err.status === 401 ||
+           m.indexOf("jwt") >= 0 ||
+           m.indexOf("pgrst301") >= 0 ||
+           m.indexOf("issued at future") >= 0 ||
+           m.indexOf("expired") >= 0 ||
+           m.indexOf("invalid claim") >= 0 ||
+           m.indexOf("not yet valid") >= 0;
+  }
+  function firstError(res){
+    if(!res) return null;
+    if(Object.prototype.toString.call(res) === "[object Array]"){
+      for(var i=0;i<res.length;i++){ if(res[i] && res[i].error) return res[i].error; }
+      return null;
+    }
+    return res.error || null;
+  }
+
+  var refreshing = null;
+  function refreshOnce(){
+    if(refreshing) return refreshing;
+    refreshing = sb.auth.refreshSession().then(function(r){
+      refreshing = null;
+      if(r.error) throw r.error;
+      var s = r.data && r.data.session;
+      if(!s) throw new Error("セッションを取り直せへんかった");
+      diag.refreshed++;
+      noteToken(s);
+      uid = s.user.id;          // 匿名ユーザーは変わらない（データは失われない）
+      return s;
+    }).catch(function(e){ refreshing = null; throw e; });
+    return refreshing;
+  }
+
+  /* Supabase呼び出しをこれで包むと、認証エラー時に自動で1回やり直す */
+  function retry(run){
+    return run().then(function(res){
+      var e = firstError(res);
+      if(e && isAuthError(e)) throw e;
+      return res;
+    }).catch(function(err){
+      if(!isAuthError(err)) throw err;
+      diag.lastAuthErr = (err.message || String(err));
+      renderDiag();
+      return refreshOnce().then(run);
+    });
+  }
+
   /* ログイン完了を他モジュール（プッシュ通知）から待てるようにする */
   var readyResolve, readyReject;
   var readyPromise = new Promise(function(res, rej){ readyResolve = res; readyReject = rej; });
   readyPromise.catch(function(){});   // 誰も待っていない場合の未処理拒否を防ぐ
   window.UgokiyaSync = {
     ready:   function(){ return readyPromise; },
-    syncNow: function(){ return syncAll(); }
+    syncNow: function(){ return syncAll(); },
+    retry:   function(run){ return retry(run); },
+    diag:    function(){ return diag; }
   };
 
   function el(id){ return document.getElementById(id); }
@@ -719,10 +821,12 @@ nagMe();render();
 
   /* --- 取ってくる：リモートのほうが新しい日だけ手元に反映 --- */
   function pull(){
-    return Promise.all([
-      sb.from("records").select("day,minutes,items,updated_at"),
-      sb.from("settings").select("goal,level,updated_at").maybeSingle()
-    ]).then(function(res){
+    return retry(function(){
+      return Promise.all([
+        sb.from("records").select("day,minutes,items,updated_at"),
+        sb.from("settings").select("goal,level,updated_at").maybeSingle()
+      ]);
+    }).then(function(res){
       var r = res[0], s = res[1];
       if(r.error) throw r.error;
       if(s.error) throw s.error;
@@ -777,19 +881,22 @@ nagMe();render();
       if(!rem || lt > rt) rows.push(rowFor(day, rec));
     });
 
-    var jobs = [];
-    if(rows.length){
-      jobs.push(sb.from("records").upsert(rows, { onConflict: "user_id,day" }));
-    }
     if(!state.settingsUpdatedAt) state.settingsUpdatedAt = new Date().toISOString();
-    jobs.push(sb.from("settings").upsert({
-      user_id: uid,
-      goal: state.goal || 20,
-      level: state.level || 2,
-      updated_at: state.settingsUpdatedAt
-    }, { onConflict: "user_id" }));
+    function jobs(){
+      var list = [];
+      if(rows.length){
+        list.push(sb.from("records").upsert(rows, { onConflict: "user_id,day" }));
+      }
+      list.push(sb.from("settings").upsert({
+        user_id: uid,
+        goal: state.goal || 20,
+        level: state.level || 2,
+        updated_at: state.settingsUpdatedAt
+      }, { onConflict: "user_id" }));
+      return list;
+    }
 
-    return Promise.all(jobs).then(function(out){
+    return retry(function(){ return Promise.all(jobs()); }).then(function(out){
       for(var i=0;i<out.length;i++){ if(out[i] && out[i].error) throw out[i].error; }
       rawSave();
     });
@@ -803,15 +910,17 @@ nagMe();render();
     var rows = [rowFor(today, rec)];
     if(!state.settingsUpdatedAt) state.settingsUpdatedAt = new Date().toISOString();
 
-    return Promise.all([
-      sb.from("records").upsert(rows, { onConflict: "user_id,day" }),
-      sb.from("settings").upsert({
-        user_id: uid,
-        goal: state.goal || 20,
-        level: state.level || 2,
-        updated_at: state.settingsUpdatedAt
-      }, { onConflict: "user_id" })
-    ]).then(function(out){
+    return retry(function(){
+      return Promise.all([
+        sb.from("records").upsert(rows, { onConflict: "user_id,day" }),
+        sb.from("settings").upsert({
+          user_id: uid,
+          goal: state.goal || 20,
+          level: state.level || 2,
+          updated_at: state.settingsUpdatedAt
+        }, { onConflict: "user_id" })
+      ]);
+    }).then(function(out){
       for(var i=0;i<out.length;i++){ if(out[i] && out[i].error) throw out[i].error; }
       dirty = false;
       setStatus("同期済み " + hhmm() + " ☁️");
@@ -852,6 +961,7 @@ nagMe();render();
       if(!session || !session.user) throw new Error("セッションが取れへんかった");
       uid = session.user.id;
       ready = true;
+      noteToken(session);
       readyResolve({ sb: sb, uid: uid });
     });
   }
@@ -864,6 +974,21 @@ nagMe();render();
       if(!ready){ setStatus("まだつながってへん。少し待ってからもう一回。"); return; }
       syncAll();
     });
+
+    var rb = el("reauthBtn");
+    if(rb) rb.addEventListener("click", function(){
+      if(!sb){ setStatus("まだつながってへん。"); return; }
+      setStatus("トークンを取り直してる…");
+      refreshOnce().then(function(){
+        setStatus("取り直したで。もう一回同期する。");
+        return syncAll();
+      }).catch(function(e){
+        setStatus("取り直せへんかった：" + (e.message || e));
+      });
+    });
+
+    renderDiag();
+    setInterval(renderDiag, 10000);
 
     if(!configured()){
       setStatus("未設定：index.html の SUPABASE_URL と SUPABASE_PUBLISHABLE_KEY を書き換えてな。");
@@ -975,15 +1100,17 @@ nagMe();render();
     if(!j || !j.endpoint || !j.keys || !j.keys.p256dh || !j.keys.auth){
       return Promise.reject(new Error("購読情報が不完全"));
     }
-    return sb.from("push_subscriptions").upsert({
-      endpoint:   j.endpoint,
-      user_id:    uid,
-      p256dh:     j.keys.p256dh,
-      auth:       j.keys.auth,
-      user_agent: String(navigator.userAgent || "").slice(0, 300),
-      fail_count: 0,
-      last_ok_at: new Date().toISOString()
-    }, { onConflict: "endpoint" }).then(function(r){
+    return window.UgokiyaSync.retry(function(){
+      return sb.from("push_subscriptions").upsert({
+        endpoint:   j.endpoint,
+        user_id:    uid,
+        p256dh:     j.keys.p256dh,
+        auth:       j.keys.auth,
+        user_agent: String(navigator.userAgent || "").slice(0, 300),
+        fail_count: 0,
+        last_ok_at: new Date().toISOString()
+      }, { onConflict: "endpoint" });
+    }).then(function(r){
       if(r.error) throw r.error;
       return j.endpoint;
     });
@@ -991,12 +1118,14 @@ nagMe();render();
 
   /* ---- 通知設定（ON/OFF・時刻・タイムゾーン）をサーバーに反映 ---- */
   function saveNotifySettings(n){
-    return sb.from("settings").upsert({
-      user_id:        uid,
-      notify_enabled: !!n.enabled,
-      notify_time:    n.time,
-      timezone:       tz()
-    }, { onConflict: "user_id" }).then(function(r){
+    return window.UgokiyaSync.retry(function(){
+      return sb.from("settings").upsert({
+        user_id:        uid,
+        notify_enabled: !!n.enabled,
+        notify_time:    n.time,
+        timezone:       tz()
+      }, { onConflict: "user_id" });
+    }).then(function(r){
       if(r.error) throw r.error;
     });
   }
