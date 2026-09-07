@@ -1,0 +1,8 @@
+project_id = "qwnyyaikgzbamvmpnygg"
+
+[functions.daily-nag]
+# 認証はEdge Function内で行う：
+#   - バッチ配信は x-cron-secret ヘッダ
+#   - テスト配信は呼び出し元ユーザーのJWTをGoTrueで検証
+# そのため入口でのJWT検証は無効にする。
+verify_jwt = false
