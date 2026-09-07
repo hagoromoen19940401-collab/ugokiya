@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<title>動きやー！</title>
+<style>
+:root{
+  --bg:#0f172a;
+  --card:#111827;
+  --card2:#1f2937;
+  --text:#f8fafc;
+  --muted:#94a3b8;
+  --accent:#22c55e;
+  --accent2:#f97316;
+  --danger:#ef4444;
+  --line:#334155;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{
+  margin:0;background:linear-gradient(180deg,#0b1020,#111827 45%,#0f172a);
+  color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;
+  min-height:100vh;
+}
+.wrap{max-width:540px;margin:0 auto;padding:calc(18px + env(safe-area-inset-top)) 16px calc(30px + env(safe-area-inset-bottom))}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.brand{font-weight:900;font-size:28px;letter-spacing:.5px}
+.small{font-size:12px;color:var(--muted)}
+.card{
+  background:rgba(17,24,39,.92);border:1px solid rgba(148,163,184,.14);
+  border-radius:24px;padding:18px;margin:12px 0;box-shadow:0 12px 30px rgba(0,0,0,.2)
+}
+.hero{padding:24px 20px;text-align:center}
+.face{font-size:58px;line-height:1;margin-bottom:12px}
+.nag{font-size:24px;font-weight:900;line-height:1.45;min-height:70px;display:flex;align-items:center;justify-content:center}
+.sub{color:var(--muted);font-size:14px;margin-top:8px}
+.progress{height:13px;background:#243041;border-radius:999px;overflow:hidden;margin:16px 0 6px}
+.bar{height:100%;background:linear-gradient(90deg,var(--accent),#86efac);width:0%;transition:.35s}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}
+.stat{background:#0b1220;border-radius:16px;padding:12px 8px}
+.stat b{font-size:24px;display:block}
+.stat span{font-size:11px;color:var(--muted)}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{
+  appearance:none;border:0;border-radius:18px;padding:16px 12px;font-weight:900;font-size:16px;cursor:pointer
+}
+.primary{background:var(--accent);color:#052e16}
+.orange{background:var(--accent2);color:white}
+.dark{background:#243041;color:white;border:1px solid #334155}
+.danger{background:#3a1820;color:#fecaca;border:1px solid #7f1d1d}
+.section-title{font-weight:900;font-size:17px;margin-bottom:10px}
+.quick{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.quick button{background:#172033;color:#fff;border:1px solid #2d3a52}
+.quick button span{display:block;font-size:11px;color:var(--muted);font-weight:600;margin-top:4px}
+.row{display:flex;gap:10px;align-items:center}
+.row>*{flex:1}
+input,select{
+  width:100%;border:1px solid #334155;background:#0b1220;color:white;border-radius:14px;padding:13px;font-size:16px
+}
+label{display:block;color:#cbd5e1;font-size:12px;margin:10px 0 5px}
+.history{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+.day{
+  min-width:62px;background:#0b1220;border-radius:14px;padding:10px 8px;text-align:center;border:1px solid #253247
+}
+.day.done{border-color:#22c55e;background:#0d2d1b}
+.day .d{font-size:11px;color:#94a3b8}.day .m{font-weight:900;margin-top:5px}
+.badge{display:inline-block;background:#0d2d1b;color:#86efac;border:1px solid #166534;padding:5px 9px;border-radius:999px;font-size:12px;font-weight:800}
+.toast{
+  position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(120px);
+  background:white;color:#111827;padding:12px 18px;border-radius:999px;font-weight:900;transition:.25s;z-index:20;white-space:nowrap
+}
+.toast.show{transform:translateX(-50%) translateY(0)}
+details summary{cursor:pointer;font-weight:900}
+hr{border:0;border-top:1px solid #263247;margin:16px 0}
+.footer{text-align:center;color:#64748b;font-size:11px;padding:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div>
+      <div class="brand">動きやー！🏃</div>
+      <div class="small" id="today"></div>
+    </div>
+    <span class="badge" id="streakBadge">🔥 0日連続</span>
+  </div>
+
+  <div class="card hero">
+    <div class="face" id="face">👀</div>
+    <div class="nag" id="nag">今日、身体動かしたん？</div>
+    <div class="sub" id="submsg">言い訳する前に10分だけでも動きやー。</div>
+
+    <div class="progress"><div class="bar" id="bar"></div></div>
+    <div class="small"><span id="minutes">0</span> / <span id="goalText">20</span> 分</div>
+
+    <div class="stats">
+      <div class="stat"><b id="todayMin">0</b><span>今日の運動</span></div>
+      <div class="stat"><b id="streak">0</b><span>連続日数</span></div>
+      <div class="stat"><b id="weekMin">0</b><span>今週合計</span></div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="primary" onclick="quickDone()">運動した！🔥</button>
+    <button class="orange" onclick="nagMe()">もっと煽って</button>
+  </div>
+
+  <div class="card">
+    <div class="section-title">何したん？</div>
+    <div class="quick">
+      <button onclick="addExercise('散歩',10)">🚶 散歩<span>10分</span></button>
+      <button onclick="addExercise('筋トレ',10)">💪 筋トレ<span>10分</span></button>
+      <button onclick="addExercise('ストレッチ',5)">🧘 ストレッチ<span>5分</span></button>
+      <button onclick="addExercise('運動',20)">🔥 がっつり<span>20分</span></button>
+    </div>
+    <hr>
+    <div class="row">
+      <div>
+        <label>運動内容</label>
+        <input id="customName" value="運動">
+      </div>
+      <div>
+        <label>分数</label>
+        <input id="customMin" type="number" min="1" max="300" value="15">
+      </div>
+    </div>
+    <button class="dark" style="width:100%;margin-top:10px" onclick="addCustom()">記録する</button>
+  </div>
+
+  <div class="card">
+    <div class="section-title">直近7日</div>
+    <div class="history" id="history"></div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>設定 ⚙️</summary>
+      <label>1日の目標（分）</label>
+      <input id="goal" type="number" min="5" max="180" value="20">
+
+      <label>煽りの強さ</label>
+      <select id="level">
+        <option value="1">やさしめ</option>
+        <option value="2" selected>普通</option>
+        <option value="3">鬼</option>
+      </select>
+
+      <button class="dark" style="width:100%;margin-top:12px" onclick="saveSettings()">設定を保存</button>
+      <button class="danger" style="width:100%;margin-top:8px" onclick="resetToday()">今日の記録をリセット</button>
+    </details>
+  </div>
+
+  <div class="footer">ホーム画面に追加して毎日開いたら、容赦なく言うで。</div>
+</div>
+<div class="toast" id="toast">記録したで！</div>
+
+<script>
+const KEY="ugokiya_v1";
+const nags={
+  1:[
+    ["😊","ちょっとだけでも身体動かそか。","5分でもええ。やったらちゃんと偉いで。"],
+    ["🚶","今日は散歩でもしよか。","外出るだけでも気分変わるで。"],
+    ["🌱","昨日より1分多く動けたら勝ち。","無理せん程度に続けよ。"]
+  ],
+  2:[
+    ["👀","今日、身体動かしたん？","言い訳する前に10分だけでも動きやー。"],
+    ["😏","まさか今日も座りっぱなしちゃうやろな？","散歩でも筋トレでも、なんか1個やり。"],
+    ["🔥","まだ間に合うで。","スマホ置いて10分動いてきーや。"],
+    ["🫵","はい、運動の時間です。","見てるだけではカロリー減らへんで。"]
+  ],
+  3:[
+    ["😈","まだ運動してへんの？","その親指だけ動かして満足してへんやろな。"],
+    ["🫵","立て。今や。","『あとで』はだいたいやらんやつやで。"],
+    ["💀","本日の運動、0分。","その記録、ほんまに残してええんか？"],
+    ["🔥","10分ぐらい動けるやろ！","スクロールする元気あるなら歩けるで！"]
+  ]
+};
+
+function load(){
+  try{return JSON.parse(localStorage.getItem(KEY))||{records:{},goal:20,level:2}}catch(e){return{records:{},goal:20,level:2}}
+}
+function save(){localStorage.setItem(KEY,JSON.stringify(state))}
+let state=load();
+
+function keyOf(d=new Date()){
+  const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,"0"),day=String(d.getDate()).padStart(2,"0");
+  return `${y}-${m}-${day}`;
+}
+function todayRecord(){
+  const k=keyOf();
+  if(!state.records[k]) state.records[k]={minutes:0,items:[]};
+  return state.records[k];
+}
+function fmtDate(){
+  const d=new Date();
+  return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+}
+function calcStreak(){
+  let c=0; let d=new Date();
+  const t=todayRecord();
+  if(t.minutes===0) d.setDate(d.getDate()-1);
+  for(let i=0;i<365;i++){
+    const r=state.records[keyOf(d)];
+    if(r&&r.minutes>0){c++;d.setDate(d.getDate()-1)}else break;
+  }
+  return c;
+}
+function weekTotal(){
+  let total=0,d=new Date();
+  const day=d.getDay(),diff=(day===0?6:day-1);
+  d.setDate(d.getDate()-diff);
+  for(let i=0;i<7;i++){
+    const r=state.records[keyOf(d)];
+    if(r) total+=r.minutes||0;
+    d.setDate(d.getDate()+1);
+  }
+  return total;
+}
+function render(){
+  const r=todayRecord(),goal=state.goal||20,st=calcStreak();
+  document.getElementById("today").textContent=fmtDate();
+  document.getElementById("minutes").textContent=r.minutes;
+  document.getElementById("todayMin").textContent=r.minutes;
+  document.getElementById("goalText").textContent=goal;
+  document.getElementById("streak").textContent=st;
+  document.getElementById("weekMin").textContent=weekTotal();
+  document.getElementById("bar").style.width=Math.min(100,(r.minutes/goal)*100)+"%";
+  document.getElementById("streakBadge").textContent=`🔥 ${st}日連続`;
+  document.getElementById("goal").value=goal;
+  document.getElementById("level").value=state.level||2;
+
+  if(r.minutes>=goal){
+    document.getElementById("face").textContent="🏆";
+    document.getElementById("nag").textContent="やるやん！！今日は合格！";
+    document.getElementById("submsg").textContent="ちゃんと身体動かしたな。明日も続けたらさらに偉い。";
+  }
+  renderHistory();
+  save();
+}
+function renderHistory(){
+  const box=document.getElementById("history"); box.innerHTML="";
+  for(let i=6;i>=0;i--){
+    const d=new Date(); d.setDate(d.getDate()-i);
+    const k=keyOf(d),r=state.records[k],min=r?.minutes||0;
+    const el=document.createElement("div");
+    el.className="day"+(min>0?" done":"");
+    el.innerHTML=`<div class="d">${d.getMonth()+1}/${d.getDate()}</div><div class="m">${min}分</div>`;
+    box.appendChild(el);
+  }
+}
+function toast(t){
+  const el=document.getElementById("toast");el.textContent=t;el.classList.add("show");
+  setTimeout(()=>el.classList.remove("show"),1600);
+}
+function addExercise(name,min){
+  const r=todayRecord(); r.minutes+=min;r.items.push({name,min,time:new Date().toISOString()}); save();
+  toast(`${name} ${min}分、えらい！🔥`); render(); celebrate();
+}
+function addCustom(){
+  const n=document.getElementById("customName").value.trim()||"運動";
+  const m=Math.max(1,parseInt(document.getElementById("customMin").value||"0"));
+  addExercise(n,m);
+}
+function quickDone(){ addExercise("運動",20); }
+function celebrate(){
+  const r=todayRecord();
+  if(r.minutes>=state.goal){
+    document.getElementById("face").textContent="🏆";
+    document.getElementById("nag").textContent="やるやん！！今日は合格！";
+    document.getElementById("submsg").textContent="その調子。その積み重ねやで🔥";
+  }
+}
+function nagMe(){
+  const arr=nags[state.level||2];
+  const x=arr[Math.floor(Math.random()*arr.length)];
+  document.getElementById("face").textContent=x[0];
+  document.getElementById("nag").textContent=x[1];
+  document.getElementById("submsg").textContent=x[2];
+}
+function saveSettings(){
+  state.goal=Math.max(5,parseInt(document.getElementById("goal").value||20));
+  state.level=parseInt(document.getElementById("level").value||2);
+  save();render();nagMe();toast("設定保存したで");
+}
+function resetToday(){
+  if(confirm("今日の運動記録を0に戻すで？")){
+    state.records[keyOf()]={minutes:0,items:[]};save();render();nagMe();toast("今日の記録をリセット");
+  }
+}
+nagMe();render();
+</script>
+</body>
+</html>
